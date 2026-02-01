@@ -1,0 +1,28 @@
+{
+  "name": "sc2-telemetry-tester",
+  "version": "1.0.0",
+  "description": "Telemetry data simulator and uploader for SC2 Solar Car - simulates Raspberry Pi CAN bus reader",
+  "main": "src/upload_telemetry.js",
+  "scripts": {
+    "start": "node src/upload_telemetry.js stream",
+    "batch": "node src/upload_telemetry.js batch",
+    "generate": "node src/generate_test_data.js",
+    "test": "node src/test_connection.js"
+  },
+  "keywords": [
+    "solar-car",
+    "telemetry",
+    "supabase",
+    "can-bus",
+    "simulator"
+  ],
+  "author": "Badgerloop Software",
+  "license": "MIT",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0"
+  },
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
