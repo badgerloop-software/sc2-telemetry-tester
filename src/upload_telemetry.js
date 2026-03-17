@@ -81,8 +81,9 @@ function toLineProtocol(record, timestampNs) {
     if (typeof value === 'boolean') {
       fields.push(`${escapedKey}=${value ? 'true' : 'false'}`);
     } else if (typeof value === 'number' && !isNaN(value)) {
-      // Use integer suffix 'i' for whole numbers, float otherwise
-      fields.push(Number.isInteger(value) ? `${escapedKey}=${value}i` : `${escapedKey}=${value}`);
+      // Always write as float — avoids InfluxDB schema conflicts between
+      // integer and float types across different records in the same field
+      fields.push(`${escapedKey}=${value}`);
     } else {
       // String value — wrap in double quotes
       const escaped = String(value).replace(/"/g, '\\"');
