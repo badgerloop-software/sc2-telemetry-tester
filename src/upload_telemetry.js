@@ -28,7 +28,7 @@ const INFLUX_ORG    = process.env.INFLUX_ORG    || '307f8812c3d9b017';
 const INFLUX_BUCKET = process.env.INFLUX_BUCKET || 'sc2-telemetry';
 
 /** InfluxDB measurement name — must match what the mobile app queries */
-const MEASUREMENT = 'telemetry';
+const MEASUREMENT = 'sc2_telemetry';
 
 // CSV file path
 const CSV_FILE = path.join(__dirname, '../data/test_telemetry.csv');
