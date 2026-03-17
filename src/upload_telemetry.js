@@ -1,128 +1,161 @@
 /**
- * CSV to Supabase Upload Script
- * 
- * This script simulates what the Raspberry Pi would do:
- * 1. Read telemetry data from CSV (or CAN bus in production)
- * 2. Parse it into key-value pairs
- * 3. Upload to Supabase for the mobile app to consume
- * 
+ * CSV to InfluxDB Upload Script
+ *
+ * Simulates what the Raspberry Pi does:
+ *   1. Read telemetry data from CSV (or CAN bus in production)
+ *   2. Parse it into key-value pairs
+ *   3. Write to InfluxDB Cloud using the Line Protocol HTTP API
+ *
  * Usage:
- *   1. Set up environment variables (SUPABASE_URL, SUPABASE_ANON_KEY)
+ *   1. Copy .env.example to .env and fill in your InfluxDB credentials
  *   2. Run: node src/upload_telemetry.js [stream|batch]
+ *
+ * Environment variables:
+ *   INFLUX_URL    — e.g. https://us-east-1-1.aws.cloud2.influxdata.com
+ *   INFLUX_TOKEN  — All-Access API token from InfluxDB dashboard
+ *   INFLUX_ORG    — Organisation ID (hex string from your org URL)
+ *   INFLUX_BUCKET — Bucket name (e.g. sc2-telemetry)
  */
 
-const fs = require('fs');
+require('dotenv').config();
+const fs   = require('fs');
 const path = require('path');
 
-// Supabase configuration - SET THESE VALUES
-const SUPABASE_URL = process.env.SUPABASE_URL || 'YOUR_SUPABASE_URL';
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'YOUR_SUPABASE_ANON_KEY';
+// ── InfluxDB configuration ────────────────────────────────────────────────────
+const INFLUX_URL    = process.env.INFLUX_URL    || 'https://us-east-1-1.aws.cloud2.influxdata.com';
+const INFLUX_TOKEN  = process.env.INFLUX_TOKEN  || '';
+const INFLUX_ORG    = process.env.INFLUX_ORG    || '307f8812c3d9b017';
+const INFLUX_BUCKET = process.env.INFLUX_BUCKET || 'sc2-telemetry';
+
+/** InfluxDB measurement name — must match what the mobile app queries */
+const MEASUREMENT = 'telemetry';
 
 // CSV file path
 const CSV_FILE = path.join(__dirname, '../data/test_telemetry.csv');
 
-// Parse CSV file
+// ── CSV parser ────────────────────────────────────────────────────────────────
 function parseCSV(filePath) {
   const content = fs.readFileSync(filePath, 'utf-8');
   const lines = content.trim().split('\n');
   const headers = lines[0].split(',');
-  
+
   const data = [];
   for (let i = 1; i < lines.length; i++) {
     const values = lines[i].split(',');
     const row = {};
     headers.forEach((header, index) => {
       const value = values[index];
-      // Try to parse as number, otherwise keep as string
       const parsed = parseFloat(value);
       row[header.trim()] = isNaN(parsed) ? value : parsed;
     });
     data.push(row);
   }
-  
   return data;
 }
 
-// Upload single telemetry record to Supabase
-async function uploadToSupabase(telemetryRecord) {
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/telemetry`, {
-    method: 'POST',
-    headers: {
-      'apikey': SUPABASE_ANON_KEY,
-      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-      'Content-Type': 'application/json',
-      'Prefer': 'return=minimal'
-    },
-    body: JSON.stringify(telemetryRecord)
-  });
-  
+// ── InfluxDB Line Protocol helpers ────────────────────────────────────────────
+
+/**
+ * Escapes special characters in InfluxDB Line Protocol tag/field keys and values.
+ */
+const escapeLP = (str) => String(str).replace(/,/g, '\\,').replace(/ /g, '\\ ').replace(/=/g, '\\=');
+
+/**
+ * Converts a telemetry record object into a single InfluxDB Line Protocol string.
+ *
+ * Line Protocol format:
+ *   <measurement>[,<tag_key>=<tag_value>] <field_key>=<field_value>[,…] [<timestamp>]
+ *
+ * Example:
+ *   telemetry speed=42.3,soc=87.1,motor_temp=45.2 1710000000000000000
+ */
+function toLineProtocol(record, timestampNs) {
+  const fields = [];
+
+  for (const [key, value] of Object.entries(record)) {
+    if (key === 'timestamp') continue; // handled separately
+    if (value === null || value === undefined || value === '') continue;
+
+    const escapedKey = escapeLP(key);
+
+    if (typeof value === 'boolean') {
+      fields.push(`${escapedKey}=${value ? 'true' : 'false'}`);
+    } else if (typeof value === 'number' && !isNaN(value)) {
+      // Use integer suffix 'i' for whole numbers, float otherwise
+      fields.push(Number.isInteger(value) ? `${escapedKey}=${value}i` : `${escapedKey}=${value}`);
+    } else {
+      // String value — wrap in double quotes
+      const escaped = String(value).replace(/"/g, '\\"');
+      fields.push(`${escapedKey}="${escaped}"`);
+    }
+  }
+
+  if (fields.length === 0) return null;
+
+  return `${MEASUREMENT} ${fields.join(',')} ${timestampNs}`;
+}
+
+/**
+ * Writes one or more Line Protocol lines to InfluxDB via the /api/v2/write endpoint.
+ */
+async function writeToInflux(lines) {
+  const body = Array.isArray(lines) ? lines.join('\n') : lines;
+
+  const response = await fetch(
+    `${INFLUX_URL}/api/v2/write?org=${INFLUX_ORG}&bucket=${INFLUX_BUCKET}&precision=ns`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Token ${INFLUX_TOKEN}`,
+        'Content-Type': 'text/plain; charset=utf-8',
+      },
+      body,
+    }
+  );
+
   if (!response.ok) {
     const error = await response.text();
-    throw new Error(`Upload failed: ${response.status} - ${error}`);
+    throw new Error(`InfluxDB write failed (${response.status}): ${error}`);
   }
-  
+
   return true;
 }
 
-// Upload latest telemetry (upsert - update if exists)
-async function upsertLatestTelemetry(telemetryRecord) {
-  // Add a fixed ID for "latest" record so we can upsert
-  const record = {
-    id: 'latest',
-    ...telemetryRecord,
-    updated_at: new Date().toISOString()
-  };
-  
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/telemetry_latest`, {
-    method: 'POST',
-    headers: {
-      'apikey': SUPABASE_ANON_KEY,
-      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-      'Content-Type': 'application/json',
-      'Prefer': 'resolution=merge-duplicates,return=minimal'
-    },
-    body: JSON.stringify(record)
-  });
-  
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Upsert failed: ${response.status} - ${error}`);
-  }
-  
-  return true;
-}
+// ── Stream mode ───────────────────────────────────────────────────────────────
 
-// Simulate real-time data streaming
 async function simulateRealTimeStream(data, intervalMs = 1000) {
-  console.log(`\n🚗 SC2 Telemetry Tester - Stream Mode`);
+  console.log(`\n🚗 SC2 Telemetry Tester — Stream Mode`);
   console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-  console.log(`📊 Records: ${data.length}`);
+  console.log(`📊 Records : ${data.length}`);
   console.log(`⏱️  Interval: ${intervalMs}ms`);
-  console.log(`🌐 Supabase: ${SUPABASE_URL.substring(0, 30)}...`);
+  console.log(`🗄️  Bucket  : ${INFLUX_BUCKET}`);
   console.log(`\nStarting stream... Press Ctrl+C to stop.\n`);
-  
+
   let index = 0;
-  
+
   const interval = setInterval(async () => {
     if (index >= data.length) {
       console.log('🔄 All records uploaded. Looping...\n');
       index = 0;
     }
-    
-    const record = data[index];
+
+    const record = { ...data[index] };
+    // Use current time as the timestamp (nanosecond precision)
+    const timestampNs = BigInt(Date.now()) * 1_000_000n;
+    record.timestamp = Date.now();
+
     try {
-      // Update the timestamp to current time for realistic simulation
-      record.timestamp = Date.now();
-      
-      await upsertLatestTelemetry(record);
-      console.log(`[${new Date().toISOString()}] ✅ Record ${index + 1}/${data.length} | Speed: ${record.speed?.toFixed(1) || 0} mph | SOC: ${record.soc?.toFixed(1) || 0}%`);
+      const line = toLineProtocol(record, timestampNs);
+      if (line) {
+        await writeToInflux(line);
+        console.log(`[${new Date().toISOString()}] ✅ Record ${index + 1}/${data.length} | Speed: ${record.speed?.toFixed(1) ?? 0} mph | SOC: ${record.soc?.toFixed(1) ?? 0}%`);
+      }
       index++;
     } catch (error) {
       console.error(`[${new Date().toISOString()}] ❌ Error: ${error.message}`);
     }
   }, intervalMs);
-  
-  // Handle graceful shutdown
+
   process.on('SIGINT', () => {
     clearInterval(interval);
     console.log('\n\n👋 Stopped data stream.');
@@ -130,56 +163,71 @@ async function simulateRealTimeStream(data, intervalMs = 1000) {
   });
 }
 
-// Batch upload all records (for historical data)
+// ── Batch mode ────────────────────────────────────────────────────────────────
+
 async function batchUpload(data) {
-  console.log(`\n🚗 SC2 Telemetry Tester - Batch Mode`);
+  console.log(`\n🚗 SC2 Telemetry Tester — Batch Mode`);
   console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
   console.log(`📊 Uploading ${data.length} historical records...\n`);
-  
+
+  // Build all lines with evenly-spaced timestamps going back in time
+  const now = BigInt(Date.now()) * 1_000_000n;
+  const stepNs = 1_000_000_000n; // 1 second apart
+
+  const lines = [];
+  for (let i = 0; i < data.length; i++) {
+    const timestampNs = now - BigInt(data.length - i) * stepNs;
+    const line = toLineProtocol(data[i], timestampNs);
+    if (line) lines.push(line);
+  }
+
+  // Send in chunks of 500 to stay under HTTP body limits
+  const CHUNK_SIZE = 500;
   let success = 0;
   let failed = 0;
-  
-  for (let i = 0; i < data.length; i++) {
+
+  for (let i = 0; i < lines.length; i += CHUNK_SIZE) {
+    const chunk = lines.slice(i, i + CHUNK_SIZE);
     try {
-      await uploadToSupabase(data[i]);
-      console.log(`✅ Uploaded ${i + 1}/${data.length}`);
-      success++;
+      await writeToInflux(chunk);
+      success += chunk.length;
+      console.log(`✅ Uploaded ${Math.min(i + CHUNK_SIZE, lines.length)}/${lines.length}`);
     } catch (error) {
-      console.error(`❌ Error uploading record ${i}: ${error.message}`);
-      failed++;
+      failed += chunk.length;
+      console.error(`❌ Error uploading chunk ${i}–${i + CHUNK_SIZE}: ${error.message}`);
     }
   }
-  
+
   console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
   console.log(`✅ Success: ${success} | ❌ Failed: ${failed}`);
   console.log(`Batch upload complete!`);
 }
 
-// Main function
+// ── Main ──────────────────────────────────────────────────────────────────────
+
 async function main() {
-  const args = process.argv.slice(2);
-  const mode = args[0] || 'stream'; // 'stream' or 'batch'
-  
-  // Check configuration
-  if (SUPABASE_URL === 'YOUR_SUPABASE_URL' || SUPABASE_ANON_KEY === 'YOUR_SUPABASE_ANON_KEY') {
-    console.error('❌ Error: Please configure Supabase credentials!');
-    console.log('\nSet environment variables:');
-    console.log('  export SUPABASE_URL="https://your-project.supabase.co"');
-    console.log('  export SUPABASE_ANON_KEY="your-anon-key"\n');
+  const mode = process.argv[2] || 'stream';
+
+  // Check credentials
+  if (!INFLUX_TOKEN) {
+    console.error('❌ Error: INFLUX_TOKEN is not set!');
+    console.log('\nCreate a .env file with:');
+    console.log('  INFLUX_TOKEN=your_token_here');
+    console.log('  INFLUX_BUCKET=sc2-telemetry\n');
     process.exit(1);
   }
-  
+
   // Check CSV file exists
   if (!fs.existsSync(CSV_FILE)) {
     console.error(`❌ Error: CSV file not found: ${CSV_FILE}`);
     console.log('\nRun: npm run generate  to create test data.\n');
     process.exit(1);
   }
-  
+
   console.log(`📁 Loading data from: ${path.basename(CSV_FILE)}`);
   const data = parseCSV(CSV_FILE);
   console.log(`✅ Loaded ${data.length} records`);
-  
+
   if (mode === 'batch') {
     await batchUpload(data);
   } else {
@@ -188,3 +236,4 @@ async function main() {
 }
 
 main();
+

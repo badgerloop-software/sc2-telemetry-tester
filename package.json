@@ -12,17 +12,18 @@
   "keywords": [
     "solar-car",
     "telemetry",
-    "supabase",
+    "influxdb",
     "can-bus",
     "simulator"
   ],
   "author": "Badgerloop Software",
   "license": "MIT",
   "dependencies": {
-    "@supabase/supabase-js": "^2.39.0"
+    "dotenv": "^16.0.0"
   },
   "devDependencies": {},
   "engines": {
     "node": ">=18.0.0"
   }
 }
+
